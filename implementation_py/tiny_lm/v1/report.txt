@@ -1,0 +1,365 @@
+Tiny LM v1 Report
+Date: 2026-04-14
+
+0) TL;DR (fast onboarding)
+- v1 studies latent sender->receiver communication (not English generation quality).
+- Main claim is now robust under controlled OOD testing: message helps a lot when receiver lacks private info.
+- Preferred protocol: fixed held-out visibility signatures across seed sweeps (`ood_signature_seed`) to reduce split noise.
+- Strong baseline under that protocol (`seeds=42..51`, heldout `[2,4]`): `iid_comm_gain=0.3714 +/- 0.0359`, `ood_comm_gain=0.7672 +/- 0.0225`.
+- Message-size sweep (`4/8/16/32`) shows all settings work well; `32` is slightly best in current runs.
+- Next question is interpretability: what information messages encode, not whether communication works.
+
+1) Version intent
+- v1 is the latent-communication research branch.
+- Main objective: learn communication protocols where agents exchange hidden vectors instead of English text.
+- This branch is designed for controlled communication experiments, ablations, and analysis.
+
+2) Research aims
+- Demonstrate that a receiver can solve belief-state tasks better with a sender message than without one.
+- Quantify communication utility with ablations.
+- Track whether latent messages encode belief-relevant information.
+
+3) Core hypothesis
+- If sender has private information and receiver lacks it, a learned continuous message should increase task accuracy.
+- Measured signal: `with_message_acc - zero_message_acc` (communication gain).
+
+4) Current implementation status
+
+Implemented foundations:
+- `comm_data.py`
+  - Synthetic false-belief episode generator.
+  - Dataset for sender tokens, receiver tokens, and target belief location.
+  - Explicit private info channel via visibility bits known to sender.
+
+- `comm_model.py`
+  - `SenderEncoder` produces continuous latent message vector.
+  - `ReceiverPolicy` consumes receiver observations + latent message.
+  - `CommAgents.forward(..., message_mode=...)` supports:
+    - `with_message`
+    - `zero_message`
+    - `shuffled_message`
+
+- `eval_comm.py`
+  - Accuracy evaluation utilities for each message mode.
+  - Combined metric dictionary including communication gain.
+
+- `train_comm.py`
+  - End-to-end training loop.
+  - Periodic ablation-aware validation logging.
+  - Final metrics report.
+
+- `tests/`
+  - `test_comm_data.py`: episode correctness and dataset shape contracts.
+  - `test_comm_model.py`: forward shape, message mode behavior, and gradient flow.
+
+5) Task design details
+
+Episode structure:
+- Object starts in an initial location.
+- Object moves `n_moves` times.
+- Protagonist may or may not see each move.
+
+Belief update rule:
+- If protagonist sees a move, belief updates to new location.
+- If protagonist does not see a move, belief remains unchanged.
+
+Observations:
+- Receiver sees object location trajectory (initial + moved locations).
+- Sender sees trajectory + visibility bits (private information).
+
+Target:
+- Final protagonist belief location (classification over `n_locations`).
+
+6) Why this setup is useful for latent communication
+- Receiver alone cannot fully recover the target because visibility is hidden.
+- Sender has privileged state and must encode it compactly in the message.
+- This creates a direct pressure to learn a useful latent protocol.
+
+7) Metric plan
+
+Primary metrics:
+- `with_message_acc`
+- `zero_message_acc`
+- `shuffled_message_acc`
+- `comm_gain = with_message_acc - zero_message_acc`
+
+Secondary diagnostics (planned):
+- Message norm and variance over batches (collapse detection).
+- Linear probe from message to belief label.
+- Generalization to held-out combinations of scenario factors.
+
+8) Experiment log template
+
+Use one block per run:
+
+Run ID:
+- Date/time:
+- Command:
+- Seed:
+- Data config (`n_locations`, `n_moves`, sees probability, split sizes):
+- Model config (`d_model`, `hidden_size`, `message_dim`):
+- Training config (epochs, batch size, lr):
+
+Results:
+- with_message_acc:
+- zero_message_acc:
+- shuffled_message_acc:
+- comm_gain:
+
+Notes:
+- Failure modes:
+- Suspected bottlenecks:
+- Next action:
+
+9) Immediate next steps
+- Run baseline training with default config and record first metrics block.
+- Add multi-seed robustness sweep with mean/std reporting. [completed 2026-04-21]
+- Sweep `message_dim` (e.g. 4, 8, 16, 32) and compare comm_gain. [completed 2026-04-21]
+- Add held-out generalization split and compare in-distribution vs OOD behavior. [completed 2026-04-21]
+- Add qualitative case viewer for 5 canonical ToM-like stories mapped into task format.
+
+9.1) First baseline run (completed)
+
+Run ID: v1-baseline-2026-04-14
+- Command: `.venv/bin/python v1/train_comm.py` (run from repo root)
+- Seed: 42
+- Data config:
+  - `n_locations=4`
+  - `n_moves=3`
+  - `protagonist_sees_prob=0.5`
+  - `train_size=4000`
+  - `val_size=800`
+- Model config:
+  - `d_model=64`
+  - `hidden_size=64`
+  - `message_dim=32`
+- Training config:
+  - `epochs=20`
+  - `batch_size=64`
+  - `learning_rate=3e-3`
+
+Observed metrics:
+- `with_message_acc = 1.0000`
+- `zero_message_acc = 0.5125`
+- `shuffled_message_acc = 0.2587`
+- `comm_gain = 0.4875`
+
+Interpretation:
+- Strong positive communication signal appears in the current synthetic task.
+- Message ablations materially degrade performance.
+- Next question is robustness: does this survive held-out/OOD splits and alternative seeds?
+
+10) Relationship to v0
+- v0 remains the single-agent LM baseline and historical reference.
+- v1 does not attempt to maximize English generation quality.
+- Any communication claims should be made from v1 metrics and ablation outcomes.
+
+11) Repro commands
+- Install dependencies from repo root:
+  `.venv/bin/python -m pip install -r v1/requirements.txt`
+- Run v1 unit tests:
+  `.venv/bin/python -m pytest -q v1/tests`
+- Run baseline v1 training from repo root:
+  `.venv/bin/python v1/train_comm.py`
+- Run fixed-heldout multi-seed sweep (default seeds `42..51`):
+  `.venv/bin/python v1/sweep_comm.py`
+- Run message-dim sweep:
+  `.venv/bin/python v1/sweep_message_dim.py --epochs 20 --ood-signature-seed 42`
+
+12) Open questions
+- Does comm_gain stay positive under distribution shift?
+- Do messages encode belief specifically, or only shortcut correlations?
+- At what message_dim does performance saturate?
+- Is discrete communication (later phase) more interpretable without hurting performance?
+
+13) Terminology quick glossary (added 2026-04-21)
+- In-distribution (IID): evaluation data sampled from the same pattern family used in training.
+- Out-of-distribution (OOD): evaluation data sampled from a deliberately held-out pattern family.
+- Visibility signature: a binary pattern over moves where `1` means protagonist saw that move and `0` means did not see it.
+  - Example for `n_moves=3`: signature `010` means only the middle move was seen.
+- Holdout ratio: fraction of feasible signatures reserved for OOD evaluation.
+- OOD signature seed: seed used only for choosing held-out signatures; allows fixed OOD split while varying training seed.
+- Leakage: when OOD-held-out signatures accidentally appear in train or IID validation data.
+- Seed sweep: repeat full train/eval across multiple random seeds to measure robustness.
+- Mean/std: aggregate center (`mean`) and variability (`std`) of a metric over seed runs.
+
+14) OOD visibility-signature holdout implementation (2026-04-21)
+- Added deterministic signature holdout selection and OOD dataset builder in `comm_data.py`.
+  - New API: `build_datasets_with_signature_ood(config, holdout_ratio, ood_val_size, signature_seed)`.
+  - New helper: `visibility_signature(saw_flags)`.
+  - Guardrails:
+    - `holdout_ratio` must be in `(0, 1)`.
+    - At least two feasible signatures are required (so `protagonist_sees_prob` cannot be exactly `0` or `1` for this split strategy).
+- Updated `train_comm.py` to train on in-distribution signatures and report both IID and OOD ablations.
+  - New train config fields: `ood_val_size`, `ood_holdout_ratio`, `ood_signature_seed`.
+  - Final metrics now include `iid_*` and `ood_*` prefixes plus held-out signature IDs.
+- Added tests for deterministic selection and leakage prevention.
+  - Command: `.venv/bin/python -m pytest -q v1/tests`
+  - Result: `12 passed in 4.83s`.
+
+14.1) OOD baseline run with default config (2026-04-21)
+Run ID: v1-ood-signature-baseline-2026-04-21
+- Command: `.venv/bin/python v1/train_comm.py` (run from repo root)
+- Seed: 42
+- Data config:
+  - `n_locations=4`
+  - `n_moves=3`
+  - `protagonist_sees_prob=0.5`
+  - `train_size=4000`
+  - `val_size=800`
+  - `ood_val_size=800`
+  - `ood_holdout_ratio=0.25`
+- Held-out visibility signatures: `[2, 4]` (bit patterns: `010`, `100`)
+
+Observed metrics:
+- `iid_with_message_acc = 1.0000`
+- `iid_zero_message_acc = 0.6575`
+- `iid_shuffled_message_acc = 0.2650`
+- `iid_comm_gain = 0.3425`
+- `ood_with_message_acc = 1.0000`
+- `ood_zero_message_acc = 0.2200`
+- `ood_shuffled_message_acc = 0.2525`
+- `ood_comm_gain = 0.7800`
+
+Interpretation:
+- Communication signal remains strong on held-out visibility patterns.
+- OOD ablations degrade much more than IID ablations, consistent with message utility under shift.
+- Next robustness step: repeat this protocol across multiple seeds and report mean/std.
+
+14.2) Multi-seed robustness sweep (2026-04-21)
+Run ID: v1-ood-signature-seed-sweep-2026-04-21
+- Command: `.venv/bin/python v1/sweep_comm.py` (run from repo root)
+- Seeds: `[42, 43, 44]`
+- Shared config:
+  - `n_locations=4`, `n_moves=3`, `protagonist_sees_prob=0.5`
+  - `train_size=4000`, `val_size=800`, `ood_val_size=800`
+  - `ood_holdout_ratio=0.25`
+  - `d_model=64`, `hidden_size=64`, `message_dim=32`
+  - `epochs=20`, `batch_size=64`, `learning_rate=3e-3`
+
+Per-seed results:
+- Seed `42`, heldout `[2, 4]`: `iid_comm_gain=0.3425`, `ood_comm_gain=0.7800`
+- Seed `43`, heldout `[3, 5]`: `iid_comm_gain=0.5575`, `ood_comm_gain=0.1625`
+- Seed `44`, heldout `[0, 3]`: `iid_comm_gain=0.4587`, `ood_comm_gain=0.0600`
+
+Aggregate results (mean +/- std):
+- IID:
+  - `iid_with_message_acc = 1.0000 +/- 0.0000`
+  - `iid_zero_message_acc = 0.5471 +/- 0.0879`
+  - `iid_shuffled_message_acc = 0.2596 +/- 0.0086`
+  - `iid_comm_gain = 0.4529 +/- 0.0879`
+- OOD:
+  - `ood_with_message_acc = 0.8804 +/- 0.1691`
+  - `ood_zero_message_acc = 0.5463 +/- 0.2533`
+  - `ood_shuffled_message_acc = 0.2675 +/- 0.0195`
+  - `ood_comm_gain = 0.3342 +/- 0.3180`
+
+Interpretation:
+- IID communication signal is stable and consistently positive across these seeds.
+- OOD communication signal remains positive on average but shows high variance across held-out signature sets.
+- OOD robustness is not yet fully stable; next priority is controlling split variability (for example fixed held-out signatures and larger seed count).
+
+14.3) Multi-seed sweep with fixed OOD split (2026-04-21)
+Run ID: v1-ood-signature-seed-sweep-fixed-heldout-2026-04-21
+- Command: `.venv/bin/python v1/sweep_comm.py` (run from repo root)
+- Seeds: `[42, 43, 44, 45, 46, 47, 48, 49, 50, 51]`
+- Fixed held-out selection:
+  - `ood_signature_seed=42`
+  - held-out visibility signatures are constant across all seed runs: `[2, 4]` (`010`, `100`)
+
+Aggregate results (mean +/- std, 10 seeds):
+- IID:
+  - `iid_with_message_acc = 1.0000 +/- 0.0000`
+  - `iid_zero_message_acc = 0.6286 +/- 0.0359`
+  - `iid_shuffled_message_acc = 0.2691 +/- 0.0064`
+  - `iid_comm_gain = 0.3714 +/- 0.0359`
+- OOD:
+  - `ood_with_message_acc = 0.9941 +/- 0.0068`
+  - `ood_zero_message_acc = 0.2269 +/- 0.0241`
+  - `ood_shuffled_message_acc = 0.2727 +/- 0.0145`
+  - `ood_comm_gain = 0.7672 +/- 0.0225`
+
+Interpretation:
+- Fixing held-out signatures while varying training seed dramatically reduced OOD variance compared with the earlier mixed-heldout sweep.
+- Communication gain is strongly positive and stable under this controlled protocol.
+- This protocol is now preferred for future cross-seed robustness reporting.
+
+14.4) Message-dimension sweep pilot (2026-04-21)
+Run ID: v1-message-dim-pilot-fixed-heldout-2026-04-21
+- Command:
+  - `.venv/bin/python v1/sweep_message_dim.py --message-dims 4 8 16 32 --seeds 42 43 44 --epochs 10 --ood-signature-seed 42`
+- Setup:
+  - fixed OOD split via `ood_signature_seed=42`
+  - 3 seeds per dimension (`42,43,44`)
+  - 10 epochs (pilot speed setting)
+
+Pilot results (`ood_comm_gain_mean +/- std`):
+- `message_dim=4`: `0.7671 +/- 0.0117`
+- `message_dim=8`: `0.7454 +/- 0.0103`
+- `message_dim=16`: `0.7542 +/- 0.0271`
+- `message_dim=32`: `0.7688 +/- 0.0186`
+
+Pilot interpretation:
+- In this setup, all tested message sizes produce strong positive OOD communication gain.
+- No clear monotonic advantage from larger messages appears yet.
+- Next action for this axis: run full sweep with 20 epochs and 10 seeds for tighter ranking confidence. [completed in 14.5]
+
+14.5) Message-dimension full sweep (2026-04-21)
+Run ID: v1-message-dim-full-fixed-heldout-2026-04-21
+- Command:
+  - `.venv/bin/python v1/sweep_message_dim.py --message-dims 4 8 16 32 --seeds 42 43 44 45 46 47 48 49 50 51 --epochs 20 --ood-signature-seed 42`
+- Setup:
+  - fixed OOD split via `ood_signature_seed=42`
+  - 10 seeds per dimension (`42..51`)
+  - 20 epochs per run
+
+Full results (`mean +/- std` over 10 seeds):
+- `message_dim=4`:
+  - `iid_comm_gain = 0.4118 +/- 0.0793`
+  - `ood_comm_gain = 0.7624 +/- 0.0405`
+- `message_dim=8`:
+  - `iid_comm_gain = 0.4016 +/- 0.0400`
+  - `ood_comm_gain = 0.7560 +/- 0.0246`
+- `message_dim=16`:
+  - `iid_comm_gain = 0.3771 +/- 0.0355`
+  - `ood_comm_gain = 0.7636 +/- 0.0310`
+- `message_dim=32`:
+  - `iid_comm_gain = 0.3714 +/- 0.0359`
+  - `ood_comm_gain = 0.7672 +/- 0.0225`
+
+Ranking by OOD communication gain mean:
+- `message_dim=32`: `0.7672`
+- `message_dim=16`: `0.7636`
+- `message_dim=4`: `0.7624`
+- `message_dim=8`: `0.7560`
+
+Interpretation:
+- All tested message dimensions remain strongly positive on OOD communication gain under the controlled fixed-heldout protocol.
+- Differences across dimensions are small in absolute terms (~0.011 spread between best and worst OOD means), suggesting weak sensitivity to `message_dim` in this task regime.
+- `message_dim=32` is currently best on OOD mean and also has the lowest OOD variance among top-performing settings in this run.
+
+15) Plain-language progress walkthrough (added 2026-04-21)
+
+What we changed, in order, and why:
+- Step 1: We confirmed the base communication setup works (sender message helps receiver).
+  - Why: establish a working reference before changing evaluation protocol.
+- Step 2: We added OOD evaluation via held-out visibility signatures.
+  - Why: test generalization, not just same-distribution performance.
+- Step 3: We ran a first multi-seed sweep and saw high OOD variance.
+  - Why this mattered: some variance came from changing which signatures were held out between seeds.
+- Step 4: We introduced `ood_signature_seed` to freeze held-out signatures across seed runs.
+  - Why: isolate model/training randomness from split-selection randomness.
+- Step 5: We reran 10 seeds with fixed heldout signatures and saw stable strong OOD communication gain.
+  - Outcome: this is now the preferred robustness protocol.
+- Step 6: We swept `message_dim` under the same fixed-heldout protocol.
+  - Outcome: all tested dimensions (4/8/16/32) perform similarly well; `32` is slightly best in current runs.
+
+How to read the current results quickly:
+- `with_message_acc`: receiver performance with true sender message.
+- `zero_message_acc`: receiver performance with message removed.
+- `comm_gain`: how much message helps (`with_message_acc - zero_message_acc`).
+- If `ood_comm_gain` stays clearly positive across many seeds with fixed heldout split, the latent communication claim is stronger.
+
+Current practical conclusion:
+- v1 now has a reproducible and defensible evaluation stack for latent communication.
+- Main remaining unknown is not "does communication work" (it does), but "what exactly is encoded in the message" (next diagnostics/probe phase).

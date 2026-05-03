@@ -1,0 +1,11 @@
+# Python virtual environment directories (ignore at any depth)
+**/.venv/
+**/venv/
+**/env/
+**/.env/  # Only directories; does not affect .env files
+**/ENV/
+**/virtualenv/
+**/.virtualenv/
+
+# IDE settings (JetBrains)
+**/.idea/

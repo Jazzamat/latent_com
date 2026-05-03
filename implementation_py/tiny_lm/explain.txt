@@ -1,0 +1,151 @@
+Tiny LM: A Technical Narrative Guide
+
+This document is written for a reader who is already comfortable with programming and Python, but who wants a complete and coherent understanding of this repository's machine learning design. The goal is to explain the project from top to bottom in plain technical prose, beginning with motivation, continuing through architecture and evaluation, and ending with what the current evidence does and does not support.
+
+Section 1. Project orientation
+
+The repository `tiny_lm` is organized as a staged research path. Version `v0` exists as a baseline language model implementation that is intentionally simple and operationally transparent. Version `v1` moves to the central research objective, which is not language quality but latent communication between agents. In practical terms, `v0` demonstrates that the team can train, evaluate, checkpoint, reload, and test a compact transformer stack. Then `v1` asks a different question: when one agent has private information and another does not, can a learned continuous message improve task performance in a controlled way.
+
+This split is important methodologically. If the code for data handling, optimization, checkpointing, and testing is unstable, any communication claim in `v1` becomes hard to trust. The repository therefore treats `v0` as infrastructure and `v1` as the research instrument.
+
+Section 2. Foundational concepts used throughout the code
+
+A token is a discrete symbol represented as an integer ID. In `v0`, tokens are characters. In `v1`, tokens are synthetic symbols describing state transitions in a belief task. An embedding is a learned lookup from token ID to a dense vector in a continuous space. The model does not reason directly over integer IDs; it reasons over these vectors.
+
+Logits are raw output scores produced by a model before normalization. In language modeling, logits are computed over vocabulary symbols at each sequence position. In classification tasks, logits are computed over classes. Loss is a scalar objective minimized during training, and in this repository it is cross-entropy. Backpropagation computes gradients of this loss with respect to model parameters, and an optimizer such as AdamW updates parameters using those gradients.
+
+A checkpoint is a serialized state that can recreate a training or inference state later. In `v0`, checkpoint contents include model parameters, optimizer state, model config, and tokenizer maps. In practice, checkpoints are what make experiments resumable and generation reproducible.
+
+Section 3. Repository structure in narrative form
+
+At top level, `tiny_lm/README.md` gives concise commands, while `report.txt` tracks project-wide progress across versions. The detailed technical and experimental history lives inside version reports at `v0/report.txt` and `v1/report.txt`.
+
+Within `v0`, the core path goes through `data.py`, `model.py`, `train.py`, and `generate.py`, with helper logic in `utils.py` and contract validation in `tests/` and `tests_blackbox/`. Within `v1`, the equivalent path goes through `comm_data.py`, `comm_model.py`, `eval_comm.py`, and `train_comm.py`, with robustness tooling in `sweep_comm.py` and hyperparameter robustness tooling in `sweep_message_dim.py`.
+
+If you want a code-first reading order, the most efficient sequence is to start from the training entrypoint in the version you care about, then inspect data construction, then inspect model forward logic, and finally inspect evaluation and tests. That ordering keeps implementation details anchored to execution context instead of reading modules in isolation.
+
+Section 4. v0 as a complete baseline system
+
+Version `v0` is a character-level decoder-only transformer. Character-level means the tokenizer vocabulary is simply the set of unique characters observed in the training corpus. This design removes tokenization complexity and makes debugging straightforward, but it usually weakens semantic abstraction compared with subword approaches because sequences become longer for the same text content.
+
+The data flow begins in `v0/data.py`. Raw text is loaded from disk and converted to integer IDs through `CharTokenizer`. The dataset object then creates train and validation splits and provides autoregressive batches. Each batch is a pair `(x, y)` where `x` is an input sequence and `y` is the same sequence shifted one position to the left. With batch size `B` and context length `T`, both tensors have shape `[B, T]`. This shift implements next-token prediction directly.
+
+The model flow is implemented in `v0/model.py`. Input tokens are mapped to token embeddings and summed with positional embeddings. The resulting tensor has shape `[B, T, D]`, where `D` is model width. That tensor is processed by a stack of transformer blocks. Each block applies causal self-attention and an MLP under residual connections. Causal masking ensures that at position `t`, attention cannot read positions greater than `t`. This enforces autoregressive semantics and is critical for training and generation consistency.
+
+After the block stack, a final normalization and output projection produce logits of shape `[B, T, V]`, where `V` is vocabulary size. If targets are provided, the model computes cross-entropy over flattened token predictions. The same forward path can optionally return hidden states. That option is not cosmetic; it provides an early interface for later latent-representation experiments.
+
+The training loop in `v0/train.py` follows the standard five-step pattern. A batch is sampled, the model computes loss, gradients are backpropagated, gradients are clipped, and the optimizer steps. Periodic evaluation uses `estimate_loss` from `v0/utils.py` to report train and validation loss snapshots. At the end, the code saves a checkpoint that includes model and tokenizer state.
+
+Generation in `v0/generate.py` loads a checkpoint, encodes a prompt, and repeatedly samples the next token from last-position logits. Optional temperature and top-k settings in `TinyLM.generate` control stochasticity and truncation of low-probability candidates.
+
+The rough architecture can be read as follows.
+
+```text
+raw text file
+    -> load_text
+    -> CharTokenizer (stoi/itos)
+    -> token id stream
+    -> TextDataset (train/val, autoregressive windows)
+    -> TinyLM forward
+         token embedding + positional embedding
+         -> TransformerBlock x N (causal attention + MLP)
+         -> final norm + output head
+         -> logits (and optional loss, optional hidden states)
+    -> train.py saves checkpoint
+    -> generate.py loads checkpoint and samples autoregressively
+```
+
+Section 5. What v0 tests establish and what they do not
+
+The unit suite in `v0/tests/` verifies API contracts and local correctness properties. It checks configuration defaults, tokenizer behavior, dataset shift semantics, shape contracts, causal behavior constraints, checkpoint roundtrips, and entrypoint orchestration. These tests are fast and isolate failures well.
+
+The blackbox suite in `v0/tests_blackbox/` runs smaller end-to-end paths that include real optimization steps and generation. A qualitative theory-of-mind probe is included for exploratory analysis. It is useful for observing behavior changes after training adjustments, but it should not be read as a robust cognitive benchmark. The report correctly treats this probe as qualitative and limited.
+
+Section 6. Why v1 exists and what problem it formalizes
+
+Version `v1` reframes the task from language generation to communication utility. The question is not whether a model can continue text fluently, but whether a sender can transmit latent information that materially helps a receiver solve a belief-state prediction problem.
+
+The core structure is intentionally asymmetric. The sender receives privileged information, while the receiver receives incomplete information. If the receiver improves significantly only when the sender message is available, the experiment has evidence that communication channel content is functionally useful.
+
+Section 7. v1 data generation and epistemic structure
+
+`v1/comm_data.py` generates synthetic episodes where an object changes location several times, and a protagonist may or may not observe each move. The target label is the protagonist's final belief location, not necessarily the true location. The belief update rule is explicit: observed moves update belief, unobserved moves do not.
+
+The receiver token stream encodes only location trajectory information. The sender token stream encodes trajectory plus visibility information. This is where private information is injected. Sender vocabulary is larger because it encodes move type and initial-state markers in separate ID ranges. The result is a controlled partial-information setting where communication has a clear functional role.
+
+Section 8. v1 model and ablation interfaces
+
+`v1/comm_model.py` defines `SenderEncoder` and `ReceiverPolicy`. The sender embeds tokens, processes them with a GRU, and projects the final hidden state to a latent message vector of dimension `message_dim`. The receiver also embeds and processes its tokens with a GRU, then concatenates its hidden state with the sender message and predicts class logits over locations.
+
+The important design choice is that message handling is part of the forward API. `CommAgents.forward` supports `with_message`, `zero_message`, and `shuffled_message`. The first uses true aligned messages. The second removes message content entirely. The third breaks alignment by permuting messages across the batch. Together these modes form an ablation triad that can distinguish true channel utility from incidental classifier strength.
+
+A compact architecture view is shown below.
+
+```text
+episode generator
+    -> sender_tokens [B, S]
+    -> receiver_tokens [B, S]
+    -> target belief class [B]
+
+sender_tokens
+    -> SenderEncoder (embedding -> GRU -> projection)
+    -> message [B, M]
+
+receiver_tokens
+    -> ReceiverPolicy backbone (embedding -> GRU)
+    -> receiver hidden [B, H]
+
+concat(receiver hidden, message) [B, H + M]
+    -> MLP head
+    -> logits [B, n_locations]
+    -> cross-entropy loss
+```
+
+Section 9. Evaluation methodology: IID, OOD, and split control
+
+`v1/eval_comm.py` computes accuracy under each message mode and derives communication gain as `with_message_acc - zero_message_acc`. In a stable system where sender information matters, this quantity should remain positive and meaningful under both IID and OOD evaluation.
+
+OOD in this repository is implemented via visibility-signature holdout. A visibility signature is a binary pattern over moves that captures observation structure, such as `010` for a three-move episode where only the middle move is seen. Train and IID validation are sampled from non-heldout signatures, while OOD validation is sampled from heldout signatures only.
+
+A key methodological improvement was adding explicit split control through `ood_signature_seed`. Without this control, each training seed can accidentally change which signatures are held out, conflating model randomness with split-selection randomness. With this control, heldout signatures stay fixed and seed sweeps measure training variability more cleanly.
+
+Section 10. Current empirical picture and interpretation
+
+Under the preferred controlled protocol in `v1`, which fixes heldout signatures and sweeps training seeds from 42 to 51, communication gain is strong and stable. The reported aggregate values are `iid_comm_gain = 0.3714 +/- 0.0359` and `ood_comm_gain = 0.7672 +/- 0.0225`. These numbers indicate that receiver performance degrades substantially when message content is removed, and that this effect persists under heldout visibility-pattern conditions.
+
+The message-dimension sweep in `v1/sweep_message_dim.py` evaluates dimensions 4, 8, 16, and 32 under the same fixed-heldout protocol and ten-seed setting. All tested dimensions show strong positive OOD communication gain. The ranking slightly favors 32 in mean OOD gain, but the spread among dimensions is small enough that the current task regime appears only weakly sensitive to message size.
+
+The cautious interpretation is that the repository now has strong evidence for communication utility in this synthetic setup, but still needs deeper representational diagnostics to answer what is encoded in the message beyond performance deltas.
+
+Section 11. Reproduction commands in narrative form
+
+If your environment is ready from the `tiny_lm/` root, install dependencies for each version with the corresponding requirements file. Run `v0` tests using the unit and blackbox suites to validate baseline infrastructure. Run `v1` tests to validate communication contracts and robustness tooling. Then run `v1/train_comm.py` for a single experiment, `v1/sweep_comm.py` for fixed-heldout multi-seed robustness, and `v1/sweep_message_dim.py --epochs 20 --ood-signature-seed 42` for the current message-dimension protocol.
+
+A direct command reference is provided below.
+
+```text
+.venv/bin/python -m pip install -r v0/requirements.txt
+.venv/bin/python -m pip install -r v1/requirements.txt
+
+.venv/bin/python -m pytest -q v0/tests
+.venv/bin/python -m pytest -q v0/tests_blackbox
+
+.venv/bin/python -m pytest -q v1/tests
+.venv/bin/python v1/train_comm.py
+.venv/bin/python v1/sweep_comm.py
+.venv/bin/python v1/sweep_message_dim.py --epochs 20 --ood-signature-seed 42
+```
+
+Section 12. Limits of current claims and next scientific step
+
+A high `with_message_acc` or high `comm_gain` does not by itself prove human-like reasoning. It proves that the communication channel contributes useful signal under the defined task and evaluation protocol. That is already meaningful, but it is not equivalent to a claim about semantic understanding or causal world modeling.
+
+The strongest near-term next step is message interpretability analysis. In practical terms, this means probing whether latent messages encode belief state in a way that survives stronger perturbations and whether the channel can be shown to represent the intended variable rather than exploiting dataset shortcuts. The repository is now in a good methodological position to perform that analysis because the evaluation protocol has moved from ad hoc runs to controlled seed-swept OOD experiments.
+
+Section 13. A practical reading path for the code
+
+For `v1`, the most productive reading order is `train_comm.py`, then `comm_data.py`, then `comm_model.py`, then `eval_comm.py`, followed by `sweep_comm.py` and `sweep_message_dim.py`, and finally the test files to confirm intended contracts. For `v0`, start with `train.py` and `data.py`, then read `model.py`, then `utils.py`, and finally the unit and blackbox tests. This order mirrors execution flow and minimizes conceptual backtracking.
+
+Final note
+
+The current state of the repository is coherent as a two-layer system. Version `v0` functions as stable baseline infrastructure, while `v1` functions as the active experimental apparatus for latent communication. The main open frontier is no longer whether communication helps in this setup, but how to characterize the content and robustness of what is being communicated.

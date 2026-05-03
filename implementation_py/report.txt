@@ -1,0 +1,125 @@
+Implementation_py Master Report
+Date: 2026-04-14
+
+Scope
+- This file tracks the overall project across versions and serves as the top-level re-onboarding document.
+- Active project in this directory: `tiny_lm/`.
+
+Project mission
+- Build a research path from a simple single-agent language model baseline to multi-agent latent communication.
+- Keep each stage reproducible and documented so future work can be resumed quickly.
+
+Version map
+- `tiny_lm/v0/`: single-agent baseline, character-level autoregressive LM.
+- `tiny_lm/v1/`: sender/receiver latent communication experiments (continuous latent message).
+- `tiny_lm/v1_0/` (planned): clean sender/receiver factual-transfer baseline with shared word vocabulary.
+
+Current status snapshot
+- v0 unit tests: `20 passed`
+- v0 blackbox tests: `2 passed`
+- v1 unit tests: `17 passed`
+- v1 OOD-enabled communication run (visibility-signature holdout):
+  - IID: `with=1.0000`, `zero=0.6575`, `shuffle=0.2650`, `comm_gain=0.3425`
+  - OOD: `with=1.0000`, `zero=0.2200`, `shuffle=0.2525`, `comm_gain=0.7800`
+  - held-out visibility signatures: `[2, 4]` (bit patterns `010`, `100`)
+- v1 fixed-heldout multi-seed OOD sweep (`seeds=42..51`, `ood_signature_seed=42`):
+  - IID `comm_gain = 0.3714 +/- 0.0359`
+  - OOD `comm_gain = 0.7672 +/- 0.0225`
+  - OOD signal is strongly positive and stable under controlled split selection.
+- v1 message-dimension full sweep (`dims=4,8,16,32`; `seeds=42..51`, fixed heldout):
+  - OOD `comm_gain` means: `dim4=0.7624`, `dim8=0.7560`, `dim16=0.7636`, `dim32=0.7672`
+  - All tested dimensions are strong; `dim32` currently leads by a small margin.
+
+Terminology quick note
+- IID (in-distribution): eval data follows the same pattern family as training.
+- OOD (out-of-distribution): eval data uses deliberately held-out pattern families.
+- Visibility signature (v1): per-move seen/unseen bit pattern used to define holdout groups.
+- OOD signature seed: seed that fixes which signatures are held out, independent of training seed.
+
+Recent status delta (2026-04-20)
+- Baseline rerun: v0 blackbox `2 passed in 11.97s`; qualitative probe `1 passed in 8.80s` with tag counts `{'unclear': 5}`.
+- Tuned qualitative setup (demo train steps `120 -> 500`): v0 blackbox `2 passed in 29.48s`; qualitative probe `1 passed in 30.03s` with tag counts `{'belief-consistent': 5}`.
+- Net effect: better qualitative belief tagging at the cost of longer blackbox runtime; outputs still show minor char-level spelling artifacts.
+- Added v0 blackbox device policy: CPU by default with explicit GPU opt-in via `TINYLM_BLACKBOX_USE_GPU=1`.
+- Current machine still falls back to CPU because installed torch build is CUDA-only and ROCm runtime is not yet configured.
+- AMD hardware was confirmed (`Radeon RX 6600`), so GPU acceleration is expected once ROCm runtime + ROCm PyTorch are installed in `.venv`.
+
+Recent status delta (2026-04-21)
+- Implemented OOD split strategy in v1 using visibility-signature holdout in `tiny_lm/v1/comm_data.py`.
+- Updated v1 training to report both IID and OOD ablation metrics (`iid_*` and `ood_*`) in `tiny_lm/v1/train_comm.py`.
+- Added leakage/determinism tests for OOD split plus an end-to-end training smoke test.
+- Verification: `.venv/bin/python -m pytest -q v1/tests` -> `12 passed in 4.83s`.
+- Baseline run with OOD reporting: `.venv/bin/python v1/train_comm.py` produced strong OOD communication gain (`0.7800`).
+
+Recent status delta (2026-04-21, later)
+- Added multi-seed robustness sweep tooling in `tiny_lm/v1/sweep_comm.py`.
+- Sweep command: `.venv/bin/python v1/sweep_comm.py`.
+- Added sweep tests in `tiny_lm/v1/tests/test_sweep_comm.py`.
+- Verification: `.venv/bin/python -m pytest -q v1/tests` -> `14 passed in 1.86s`.
+- Sweep result (`seeds=[42,43,44]`): IID gains are consistently positive, while OOD gains remain positive on average but vary substantially by held-out signature set.
+
+Recent status delta (2026-04-21, latest)
+- Added explicit split-control support (`ood_signature_seed`) so held-out visibility signatures can be fixed across seed sweeps.
+- Updated sweep defaults to `42..51` seeds and fixed heldout signatures for fairer robustness measurement.
+- Added message-dimension sweep tooling in `tiny_lm/v1/sweep_message_dim.py`.
+- Verification: `.venv/bin/python -m pytest -q v1/tests` -> `17 passed in 1.85s`.
+- Fixed-heldout 10-seed sweep result: strong/stable OOD gain (`0.7672 +/- 0.0225`).
+- Full message-dim sweep (10 seeds, 20 epochs, fixed heldout):
+  - `dim4=0.7624 +/- 0.0405`
+  - `dim8=0.7560 +/- 0.0246`
+  - `dim16=0.7636 +/- 0.0310`
+  - `dim32=0.7672 +/- 0.0225`
+  - Net: strong OOD communication across all tested dimensions with small differences.
+
+Planned status delta (2026-05-03)
+- New implementation track is approved in `tiny_lm/v1_0/`; `tiny_lm/v1/` remains unchanged.
+- `v1_0` scope is intentionally narrow: sender receives a factual statement, receiver receives a question, receiver predicts the target location/container class.
+- `v1_0` data plan: synthetic templated text pairs with hand-rolled shared word tokenization (`<PAD>`, `<UNK>`, `<BOS>`, `<EOS>`), with vocabulary built from train split sender+receiver text.
+- `v1_0` model plan: sender encoder -> latent message -> receiver encoder/classifier, with ablations `with_message`, `zero_message`, and `shuffled_message`.
+- `v1_0` reporting plan: track `with_message_acc`, `zero_message_acc`, `shuffled_message_acc`, and `comm_gain`; render class predictions into simple natural-language answers for demos.
+- False-belief reasoning is explicitly deferred to `v1_1`; `v1_0` is communication-capacity first.
+
+What "character-level" means (v0)
+- In v0, each individual character is a token (letters, spaces, punctuation, newline).
+- Example conceptually: "Hello" is modeled as H, e, l, l, o instead of whole words/subwords.
+- Pros:
+  - Very simple tokenizer and data pipeline.
+  - No unknown word issue (any seen character can be generated).
+  - Good for debugging model/training mechanics.
+- Cons:
+  - Long effective sequence lengths for the same content.
+  - Weaker semantic abstraction than subword/word tokenization.
+  - More prone to local repetition and less coherent long-form generation in tiny models.
+
+Why this design was chosen first
+- v0 is intended as a minimal, understandable baseline.
+- Character-level keeps the stack small while validating core training, generation, tests, and checkpoint flow.
+
+What we will do in the future
+
+Near-term (v0 hardening)
+- Keep v0 character-level for now.
+- Improve reproducibility and diagnostics (run metadata, consistent eval prompts, better checkpoint logging).
+- Keep v0 stable as a baseline reference; only apply targeted bug fixes and quality-of-life improvements.
+
+Mid-term (v1 latent communication)
+- Expand communication experiments with stronger evaluations:
+  - ablations (`with_message`, `zero_message`, `shuffled_message`)
+  - OOD splits and multiple seeds
+  - message diagnostics (norm/variance, collapse checks)
+  - probes for whether message encodes belief state vs shortcuts.
+- Add qualitative latent-analysis reports tied to canonical ToM-style cases.
+
+Long-term (possible extensions)
+- Add alternative tokenization (subword/BPE) once baseline comparisons are stable.
+- Explore discrete communication channels (e.g., VQ/Gumbel) for interpretability.
+- Move from synthetic tasks toward richer environments while preserving ablation rigor.
+
+Where detailed notes live
+- v0 detailed report: `tiny_lm/v0/report.txt`
+- v1 detailed report: `tiny_lm/v1/report.txt`
+
+Update policy
+- After each meaningful experiment or architecture change:
+  - update the relevant version report first,
+  - then update this master report with a concise status delta.

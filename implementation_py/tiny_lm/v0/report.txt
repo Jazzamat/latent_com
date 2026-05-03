@@ -1,0 +1,188 @@
+Tiny LM v0 Report
+Date: 2026-04-14
+
+0) TL;DR (fast onboarding)
+- v0 is the single-agent baseline: a tiny decoder-only character-level language model, intentionally kept simple.
+- Core pipeline is complete and stable: train -> checkpoint -> generate, with optional hidden-state return.
+- Verification status is solid: v0 unit tests `20 passed`, blackbox tests `2 passed`.
+- The qualitative ToM probe improved after tuning (from mostly `unclear` to `belief-consistent` on this tiny closed set), but this is not robust reasoning evidence.
+- Blackbox GPU opt-in exists (`TINYLM_BLACKBOX_USE_GPU=1`), but this machine currently falls back to CPU because ROCm-enabled runtime/PyTorch is not configured.
+- v0 should be treated as a reference baseline; major latent-communication work continues in v1.
+- Rough architecture (v0):
+
+```text
+data/input.txt
+    |
+load_text -> CharTokenizer -> token ids
+    |             |
+    |             +-> vocab (stoi/itos)
+    v
+TextDataset (train/val split, autoregressive batches x,y)
+    |
+    v
+TinyLM
+  token_emb + pos_emb
+    -> TransformerBlock x N (causal self-attention + MLP)
+    -> ln_f -> lm_head
+    -> outputs: logits, loss(optional), hidden_states(optional)
+
+train.py -> save_checkpoint(.pt) -> generate.py -> model.generate() -> decoded text
+```
+
+1) Version intent
+- v0 is the single-agent baseline branch for this project.
+- The focus is a minimal decoder-only character-level language model in PyTorch.
+- This version is intentionally simple and is used as a reference point before latent-communication work.
+
+2) High-level goals completed
+- Build end-to-end train and generate scripts.
+- Support optional hidden-state return from the model API.
+- Add unit tests and separate blackbox tests.
+- Add a qualitative Theory-of-Mind (ToM) probe for exploratory analysis.
+
+3) Code structure and responsibilities
+- `config.py`
+  - Defines `ModelConfig` and `TrainConfig`.
+  - `TrainConfig` includes runtime fields used by both `train.py` and `generate.py`.
+
+- `data.py`
+  - `CharTokenizer`: sorted char vocabulary, encode/decode.
+  - `TextDataset`: train/val split and autoregressive batch creation.
+  - `load_text(path)` helper.
+
+- `model.py`
+  - Modules: `CausalSelfAttention`, `MLP`, `TransformerBlock`, `TinyLM`.
+  - `TinyLM.forward(...)` returns `(logits, loss, hidden_states)`.
+  - Raises `ValueError` when sequence length exceeds `block_size`.
+  - Supports `return_hidden_states=True` with minimal contract: `{"layers": [...]}`.
+  - Includes autoregressive `generate(...)` with `temperature` and optional `top_k`.
+
+- `utils.py`
+  - `set_seed` for deterministic setup.
+  - `estimate_loss` for train/val evaluation, restoring prior train/eval mode.
+  - `save_checkpoint` / `load_checkpoint`.
+  - `load_checkpoint` uses `torch.load(..., weights_only=False)` for modern PyTorch compatibility.
+
+- `train.py`
+  - Trains model with periodic eval logging.
+  - Saves checkpoint at configured path.
+
+- `generate.py`
+  - Loads checkpoint and generates from prompt "Hello".
+
+4) Testing inventory
+
+Unit tests (`tests/`):
+- `test_config.py`
+  - Verifies `ModelConfig` defaults and `TrainConfig` API contract.
+- `test_data.py`
+  - Verifies tokenizer determinism, roundtrip behavior, unknown-char failure.
+  - Verifies dataset split and next-token shift behavior.
+- `test_model.py`
+  - Verifies forward return contract and shape semantics.
+  - Verifies sequence length guard.
+  - Verifies causal behavior (future token change does not alter earlier logits).
+  - Verifies `generate` output length and token bounds.
+- `test_utils.py`
+  - Verifies seeding determinism.
+  - Verifies `estimate_loss` output format and train/eval mode restore.
+  - Verifies checkpoint roundtrip integrity.
+- `test_entrypoints.py`
+  - Verifies train/generate script orchestration with mocks.
+
+Blackbox tests (`tests_blackbox/`):
+- `test_e2e_blackbox.py`
+  - Tiny real training loop, checkpoint save/load, generation validity checks.
+- `test_tom_qualitative.py`
+  - 5 false-belief-style prompts.
+  - Prints qualitative report and tags responses as:
+    - `belief-consistent`
+    - `reality-consistent`
+    - `unclear`
+
+5) Test results captured
+- Unit suite result: `20 passed`.
+- Blackbox suite result: `2 passed`.
+- ToM qualitative run (current tiny setup): all 5 prompts tagged `unclear`.
+
+5.1) Verification rerun (2026-04-20)
+- Command: `.venv/bin/python -m pytest -q v0/tests_blackbox`
+  - Result: `2 passed in 11.97s`.
+- Command: `.venv/bin/python -m pytest -q v0/tests_blackbox/test_tom_qualitative.py -s`
+  - Result: `1 passed in 8.80s`.
+- Qualitative tag counts: `{'unclear': 5}`.
+- Observed response pattern: repetitive continuations like `the the the ...`, consistent with baseline semantic weakness.
+
+5.2) Qualitative tuning rerun (2026-04-20)
+- Change applied: in `tests_blackbox/test_tom_qualitative.py`, increase demo training from `120` to `500` steps and require at least 3 `belief-consistent` tags to guard against regression.
+- Command: `.venv/bin/python -m pytest -q v0/tests_blackbox`
+  - Result: `2 passed in 29.48s`.
+- Command: `.venv/bin/python -m pytest -q v0/tests_blackbox/test_tom_qualitative.py -s`
+  - Result: `1 passed in 30.03s`.
+- Qualitative tag counts: `{'belief-consistent': 5}`.
+- Observed response pattern: correct belief location is now usually present, but wording still shows small char-level artifacts (for example, `basketaret`, `willok`).
+
+5.3) Blackbox device policy update (2026-04-20)
+- Added opt-in GPU execution for blackbox tests via env var `TINYLM_BLACKBOX_USE_GPU=1`.
+- Default behavior remains CPU for stable CI/runtime expectations.
+- If GPU is requested but unavailable, tests automatically fall back to CPU.
+- Validation commands:
+  - `.venv/bin/python -m pytest -q v0/tests_blackbox` -> `2 passed in 29.85s`.
+  - `TINYLM_BLACKBOX_USE_GPU=1 .venv/bin/python -m pytest -q v0/tests_blackbox` -> `2 passed in 29.40s` (CPU fallback in current env).
+
+5.4) AMD GPU acceleration status (2026-04-20)
+- Hardware present: `AMD Radeon RX 6600` (`lspci` shows Navi 23).
+- Current venv backend: `torch 2.11.0+cu130` (CUDA build), `torch.cuda.is_available() = False`, `torch.version.hip = None`.
+- ROCm userspace tool check: `rocminfo not found`.
+- Conclusion: blackbox GPU opt-in wiring is in place, but this machine currently executes on CPU because ROCm-enabled PyTorch/runtime is not configured.
+- Practical next setup steps (outside test code):
+  - install ROCm runtime/tools,
+  - install a ROCm PyTorch build in `.venv`,
+  - verify with `.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.hip)"`,
+  - rerun `TINYLM_BLACKBOX_USE_GPU=1 .venv/bin/python -m pytest -q v0/tests_blackbox`.
+
+6) ToM qualitative interpretation in v0
+- The model is character-level and small, with short training focused on local next-char prediction.
+- At 120 training steps, generated answers are often repetitive and not semantically grounded.
+- At 500 training steps on the tiny synthetic corpus, the model reaches belief-consistent tags on all 5 prompts, but outputs still include character-level corruption.
+- This should be read as stronger pattern memorization on a tiny closed set, not robust evidence of social reasoning.
+
+7) Practical runbook
+- Install deps from repo root: `.venv/bin/python -m pip install -r v0/requirements.txt`
+- Run v0 unit tests: `.venv/bin/python -m pytest -q v0/tests`
+- Run v0 blackbox tests: `.venv/bin/python -m pytest -q v0/tests_blackbox`
+- Run v0 blackbox tests with GPU opt-in: `TINYLM_BLACKBOX_USE_GPU=1 .venv/bin/python -m pytest -q v0/tests_blackbox`
+- Run qualitative ToM probe with prints:
+  `.venv/bin/python -m pytest -q v0/tests_blackbox/test_tom_qualitative.py -s`
+
+8) Known limitations
+- Character-level modeling limits semantic reliability.
+- No robust instruction-following behavior expected from model size/data budget.
+- ToM probe is qualitative and exploratory, not a benchmark.
+- No latent-agent communication channel in this version.
+
+9) Why v1 exists
+- Project goal is latent communication among agents via hidden representations.
+- v0 established a working model/testing baseline but does not address multi-agent communication.
+- v1 is created to focus directly on sender/receiver latent-channel experiments.
+
+10) Handoff notes
+- Treat v0 as stable reference baseline.
+- Keep v0 changes minimal except bug fixes.
+- Add all latent communication research and experiments in v1.
+
+11) What char-level means in v0
+- Tokenization granularity is one character per token.
+- Example: the string "cat" is represented as c, a, t.
+- Practical implications:
+  - Simpler preprocessing and smaller tokenizer complexity.
+  - No unknown word boundary problems.
+  - Longer sequence lengths and weaker semantic abstraction for tiny models.
+
+12) Future direction from v0
+- Keep v0 as a stable, reproducible baseline while v1 absorbs most new research work.
+- Planned v0 improvements are mostly reliability-oriented:
+  - clearer run metadata,
+  - stronger evaluation logging,
+  - baseline regression checks.
+- Larger architectural exploration (latent communication, stronger probes, OOD analyses) is intentionally moved to v1.
